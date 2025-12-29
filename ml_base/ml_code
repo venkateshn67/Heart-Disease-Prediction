@@ -1,0 +1,171 @@
+# train_and_save_models.py
+
+import pandas as pd
+import numpy as np
+import warnings
+import pickle
+import os
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.impute import KNNImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.preprocessing import StandardScaler
+
+warnings.filterwarnings('ignore')
+
+# --- 1. Data Loading ---
+FILE_PATH = 'heart.csv'
+try:
+    heart_df = pd.read_csv(FILE_PATH)
+    print("Dataset loaded successfully.")
+except FileNotFoundError:
+    print(f"Error: '{FILE_PATH}' not found. Place it in the current directory.")
+    exit()
+
+# --- 2. Data Cleaning and Preprocessing ---
+
+print("\n--- Starting Data Preprocessing ---")
+
+cat_cols = heart_df.select_dtypes(include=['object']).columns.tolist()
+
+for col in cat_cols:
+    heart_df[col] = heart_df[col].astype('category')
+    unique_vals = heart_df[col].cat.categories
+    replacement_map = {val: i for i, val in enumerate(unique_vals)}
+    heart_df[col].replace(replacement_map, inplace=True)
+
+heart_df['Cholesterol'].replace(0, np.nan, inplace=True)
+heart_df['RestingBP'].replace(0, np.nan, inplace=True)
+
+imputer = KNNImputer(n_neighbors=3)
+imputed_data = imputer.fit_transform(heart_df)
+heart_df_imputed = pd.DataFrame(imputed_data, columns=heart_df.columns)
+heart_df = heart_df_imputed
+
+cols_to_convert = heart_df.drop(columns=['Oldpeak']).columns
+heart_df[cols_to_convert] = heart_df[cols_to_convert].astype('int32')
+
+print("Preprocessing complete.")
+
+# --- 3. Data Splitting ---
+
+print("\n--- Splitting Data ---")
+X = heart_df.drop(columns=['HeartDisease'])
+y = heart_df['HeartDisease']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2,
+    random_state=42,
+    stratify=y
+)
+
+# --- 4. Feature Scaling ---
+print("\n--- Applying Feature Scaling ---")
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+X_train_scaled = pd.DataFrame(X_train_scaled, columns=X_train.columns)
+X_test_scaled = pd.DataFrame(X_test_scaled, columns=X_test.columns)
+
+print("Feature scaling complete.")
+print(f"X_train_scaled shape: {X_train_scaled.shape}, y_train shape: {y_train.shape}")
+print(f"X_test_scaled shape: {X_test_scaled.shape}, y_test shape: {y_test.shape}")
+
+
+# --- 5. Model Training and Hyperparameter Tuning ---
+
+print("\n--- Training Logistic Regression ---")
+solvers = ['lbfgs', 'newton-cg', 'liblinear', 'sag', 'saga', 'newton-cholesky']
+best_lr_score = 0
+best_solver_name = 'lbfgs'
+
+for n in solvers:
+    try:
+        lr_model = LogisticRegression(solver=n, random_state=42, max_iter=1000)
+        lr_model.fit(X_train_scaled, y_train)
+        current_score = lr_model.score(X_test_scaled, y_test)
+        if current_score > best_lr_score:
+            best_lr_score = current_score
+            best_solver_name = n
+    except Exception:
+        pass
+
+final_lr_model = LogisticRegression(solver=best_solver_name, random_state=42, max_iter=1000)
+final_lr_model.fit(X_train_scaled, y_train)
+lr_accuracy = accuracy_score(y_test, final_lr_model.predict(X_test_scaled))
+print(f"LR Best Solver: {best_solver_name}, Accuracy: {lr_accuracy:.4f}")
+
+print("\n--- Training Support Vector Machine (SVC) ---")
+kernels = ['linear', 'poly', 'rbf', 'sigmoid']
+best_svm_f1 = 0
+best_kernel_name = 'rbf'
+
+for i in kernels:
+    svm_model = SVC(kernel=i, random_state=42)
+    svm_model.fit(X_train_scaled, y_train)
+    y_hat = svm_model.predict(X_test_scaled)
+    current_f1 = f1_score(y_test, y_hat, average='weighted')
+    if current_f1 > best_svm_f1:
+        best_svm_f1 = current_f1
+        best_kernel_name = i
+
+final_svm_model = SVC(kernel=best_kernel_name, random_state=42)
+final_svm_model.fit(X_train_scaled, y_train)
+svm_accuracy = accuracy_score(y_test, final_svm_model.predict(X_test_scaled))
+print(f"SVC Best Kernel: {best_kernel_name}, Accuracy: {svm_accuracy:.4f}")
+
+
+print("\n--- Tuning Decision Tree ---")
+dt_classifier = DecisionTreeClassifier(random_state=42)
+param_grid_dt = {
+    'max_depth': [5, 7, 9, 11, 15],
+    'min_samples_split': [2, 5, 10, 20],
+    'min_samples_leaf': [1, 2, 4, 8],
+}
+grid_search_dt = GridSearchCV(dt_classifier, param_grid_dt, cv=5, scoring='f1_weighted', n_jobs=-1)
+grid_search_dt.fit(X_train_scaled, y_train)
+dt_best_model = grid_search_dt.best_estimator_
+dt_accuracy = accuracy_score(y_test, dt_best_model.predict(X_test_scaled))
+print(f"DTC Best Params: {grid_search_dt.best_params_}, Accuracy: {dt_accuracy:.4f}")
+
+
+print("\n--- Tuning Random Forest (for RF and GridRF) ---")
+rf_classifier = RandomForestClassifier(random_state=42)
+param_grid_rf = {
+    'n_estimators': [50, 100, 200, 300],
+    'max_features': ['sqrt', 'log2', None],
+    'max_depth': [5, 10, None, 15],
+}
+grid_search_rf = GridSearchCV(rf_classifier, param_grid_rf, cv=5, scoring='f1_weighted', n_jobs=-1)
+grid_search_rf.fit(X_train_scaled, y_train)
+rf_best_model = grid_search_rf.best_estimator_
+rf_accuracy = accuracy_score(y_test, rf_best_model.predict(X_test_scaled))
+print(f"RFC Best Params: {grid_search_rf.best_params_}, Accuracy: {rf_accuracy:.4f}")
+
+
+# --- 6. Model Serialization (Pickling) ---
+
+print("\n--- Saving Models to Pickle Files ---")
+
+if not os.path.exists('models'):
+    os.makedirs('models')
+    print("Created 'models' directory.")
+
+models_to_save = {
+    'models/scaler.pkl': scaler,
+    'models/lr_model.pkl': final_lr_model,
+    'models/svm_model.pkl': final_svm_model,
+    'models/dt_model.pkl': dt_best_model,
+    'models/rf_model.pkl': rf_best_model,
+    'models/gridrf_model.pkl': rf_best_model
+}
+
+for file_name, model in models_to_save.items():
+    with open(file_name, 'wb') as file:
+        pickle.dump(model, file)
+        print(f"Saved {file_name}")
